@@ -1,0 +1,22 @@
+[package]
+name = "sluice"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+abpl = {version = "0.1.4", features = ["derive_error", "app", "http", "serde"]}
+serde = {version = "1.0.229", features = ["derive"]}
+serde_with = "3.21.0"
+tracing = "0.1.44"
+tracing-subscriber = "0.3.23"
+# https://github.com/structured-world/structured-email-address would be cool to use if I ever feature-creep this thing.
+email_address = {version = "0.2.9", features = ["serde_support"]}
+axum = "0.8.9"
+const_format = "0.2.36"
+regex = "1.13.1"
+lazy-regex = "3.6.0"
+
+[build-dependencies]
+rustc_version = "0.4.1"
+chrono = "0.4.45"
+semver = "1.0.28"

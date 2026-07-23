@@ -1,0 +1,22 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "$(refresh)$(debug-coverage) lcov",
+            "type": "shell",
+            "command": "cargo",
+            "args": [
+                "llvm-cov",
+                "--all-features",
+                "--lcov",
+                "--output-path",
+                "lcov.info"
+            ],
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "silent",
+                "panel": "shared"
+            }
+        }
+    ]
+}

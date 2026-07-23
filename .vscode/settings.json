@@ -1,0 +1,5 @@
+{
+    "rust-analyzer.check.command": "clippy",
+    "nixEnvSelector.nixFile": "${workspaceFolder}/shell.nix",
+    "nixEnvSelector.useFlakes": false
+}
