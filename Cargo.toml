@@ -1,10 +1,19 @@
 [package]
-name = "sluice"
+name = "mail-sluice"
 version = "0.1.0"
 edition = "2024"
 description = "Flow-control for ngx_mail_auth_http_module"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/norstone-tech/sluice"
+keywords = ["nginx", "smtp", "mail-proxy", "auth-http", "email"]
+categories = ["network-programming", "email"]
+
+[lib]
+name = "sluice"
+
+[[bin]]
+name = "sluice"
+path = "src/main.rs"
 
 [dependencies]
 abpl = {version = "0.1.4", features = ["derive_error", "app", "http", "serde"]}
