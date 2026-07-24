@@ -33,13 +33,24 @@ async fn auth(
 	State(state): State<Arc<SluiceState>>,
 	headers: HeaderMap,
 ) -> Result<ProxyTableResponse, ProxyTableLookupError> {
-	let is_authenticated = headers
+	if headers
 		.get("Auth-Method")
-		.is_none_or(|auth_method| auth_method == "none");
-
-	// We should only use the sending address for authenticated connections, otherwise sending mail from and to domains
-	// managed by the same server would break.
-	if is_authenticated {
+		.is_some_and(|auth_method| auth_method != "none")
+	{
+		// nginx doesn't send MAIL FROM on authenticated connections, so we have to use the provided user name. Assume
+		// that the user name is a valid e-mail address.
+		let from = EmailAddress::from_str(
+			headers
+				.get("Auth-User")
+				.and_then(|from| from.to_str().ok())
+				.unwrap_or_default(),
+		)
+		.map_err_invalid_from()?;
+		if let Some(upstream) = state.proxy_map.get(&from.domain().to_ascii_lowercase()) {
+			return Ok(ProxyTableResponse { server: *upstream });
+		};
+		Err(ProxyTableLookupError::auth_lookup_failed())
+	} else {
 		// this fails to parse on an empty string, the resulting error is slightly opaque, but only someone who's
 		// actively poking around will see it. Still safe!
 		let rcpt = EmailAddress::from_str(
@@ -53,29 +64,25 @@ async fn auth(
 		if let Some(upstream) = state.proxy_map.get(&rcpt.domain().to_ascii_lowercase()) {
 			return Ok(ProxyTableResponse { server: *upstream });
 		};
-	}
+		let from_unchecked = headers
+			.get("Auth-SMTP-From")
+			.and_then(|from| from.to_str().ok())
+			.and_then(|from| regex_captures!(r"^MAIL FROM:\s*<\s*(.*)\s*>\s*", from).map(|(_, from)| from))
+			.unwrap_or_default();
 
-	let from_unchecked = headers
-		.get("Auth-SMTP-From")
-		.and_then(|from| from.to_str().ok())
-		.and_then(|from| regex_captures!(r"^MAIL FROM:\s*<\s*(.*)\s*>\s*", from).map(|(_, from)| from))
-		.unwrap_or_default();
-
-	// from may be null, which may be the case in auto-generated bounce messages and the like.
-	if !from_unchecked.is_empty()
-		&& let Some(upstream) = state.proxy_map.get(
-			&EmailAddress::from_str(from_unchecked)
-				.map_err_invalid_from()?
-				.domain()
-				.to_ascii_lowercase(),
-		) {
-		return Ok(ProxyTableResponse { server: *upstream });
+		// from may be null, which may be the case in auto-generated bounce messages and the like.
+		if !from_unchecked.is_empty()
+			&& let Some(upstream) = state.proxy_map.get(
+				&EmailAddress::from_str(from_unchecked)
+					.map_err_invalid_from()?
+					.domain()
+					.to_ascii_lowercase(),
+			) {
+			// We're going to assume that the upstream server can handle unauthenticated from addresses correctly.
+			return Ok(ProxyTableResponse { server: *upstream });
+		}
+		Err(ProxyTableLookupError::lookup_failed())
 	}
-	Err(if is_authenticated {
-		ProxyTableLookupError::auth_lookup_failed()
-	} else {
-		ProxyTableLookupError::lookup_failed()
-	})
 }
 
 pub struct ProxyTableResponse {
