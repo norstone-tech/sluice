@@ -31,6 +31,8 @@ impl Display for ServiceErrorKind {
 pub enum ProxyTableLookupErrorKind {
 	#[abpl_provider(smtp_status((StatusClass::PermFail, StatusSubject::SecurityOrPolicy, 50, 1).into()))]
 	LookupFailed,
+	#[abpl_provider(smtp_status((StatusClass::PermFail, StatusSubject::SecurityOrPolicy, 50, 1).into()))]
+	AuthLookupFailed,
 	#[cause(email_address::Error)]
 	#[abpl_provider(smtp_status((StatusClass::PermFail, StatusSubject::Addressing, 1, 7).into()))]
 	InvalidFrom,
@@ -44,6 +46,7 @@ impl Display for ProxyTableLookupErrorKind {
 			Self::LookupFailed => {
 				f.write_str("neither the sending nor receiving domain is associated with this server")
 			},
+			Self::AuthLookupFailed => f.write_str("the sending domain is associated with this server"),
 			Self::InvalidFrom => f.write_str("invalid sender"),
 			Self::InvalidRcpt => f.write_str("invalid recipient"),
 		}

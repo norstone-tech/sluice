@@ -33,19 +33,27 @@ async fn auth(
 	State(state): State<Arc<SluiceState>>,
 	headers: HeaderMap,
 ) -> Result<ProxyTableResponse, ProxyTableLookupError> {
-	// this fails to parse on an empty string, the resulting error is slightly opaque, but only someone who's
-	// actively poking around will see it. Still safe!
-	let rcpt = EmailAddress::from_str(
-		headers
-			.get("Auth-SMTP-To")
-			.and_then(|from| from.to_str().ok())
-			.and_then(|from| regex_captures!(r"^RCPT TO:\s*<\s*(.*)\s*>\s*", from).map(|(_, from)| from))
-			.unwrap_or_default(),
-	)
-	.map_err_invalid_rcpt()?;
-	if let Some(upstream) = state.proxy_map.get(&rcpt.domain().to_ascii_lowercase()) {
-		return Ok(ProxyTableResponse { server: *upstream });
-	};
+	let is_authenticated = headers
+		.get("Auth-Method")
+		.is_none_or(|auth_method| auth_method == "none");
+
+	// We should only use the sending address for authenticated connections, otherwise sending mail from and to domains
+	// managed by the same server would break.
+	if is_authenticated {
+		// this fails to parse on an empty string, the resulting error is slightly opaque, but only someone who's
+		// actively poking around will see it. Still safe!
+		let rcpt = EmailAddress::from_str(
+			headers
+				.get("Auth-SMTP-To")
+				.and_then(|from| from.to_str().ok())
+				.and_then(|from| regex_captures!(r"^RCPT TO:\s*<\s*(.*)\s*>\s*", from).map(|(_, from)| from))
+				.unwrap_or_default(),
+		)
+		.map_err_invalid_rcpt()?;
+		if let Some(upstream) = state.proxy_map.get(&rcpt.domain().to_ascii_lowercase()) {
+			return Ok(ProxyTableResponse { server: *upstream });
+		};
+	}
 
 	let from_unchecked = headers
 		.get("Auth-SMTP-From")
@@ -63,7 +71,11 @@ async fn auth(
 		) {
 		return Ok(ProxyTableResponse { server: *upstream });
 	}
-	Err(ProxyTableLookupError::lookup_failed())
+	Err(if is_authenticated {
+		ProxyTableLookupError::auth_lookup_failed()
+	} else {
+		ProxyTableLookupError::lookup_failed()
+	})
 }
 
 pub struct ProxyTableResponse {
