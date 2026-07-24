@@ -26,6 +26,9 @@ pkgs.mkShell {
     # vscode complains if I don't have this?
     python3
 
+    # nginx with mail proxy modules (IMAP/POP3/SMTP proxy support)
+    (nginx.override { withMail = true; })
+
     # uncomment below if we need native dependencies for some reason
     # rustPlatform.rustLibSrc
     # pkg-config

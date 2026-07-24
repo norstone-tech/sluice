@@ -1116,10 +1116,12 @@ version = "0.1.0"
 dependencies = [
  "abpl",
  "axum",
+ "base64",
  "chrono",
  "const_format",
  "email_address",
  "lazy-regex",
+ "libc",
  "regex",
  "rustc_version",
  "semver",

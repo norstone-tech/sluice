@@ -20,3 +20,7 @@ lazy-regex = "3.6.0"
 rustc_version = "0.4.1"
 chrono = "0.4.45"
 semver = "1.0.28"
+
+[dev-dependencies]
+libc = "0.2.177"
+base64 = "0.22.1"
