@@ -2,6 +2,9 @@
 name = "sluice"
 version = "0.1.0"
 edition = "2024"
+description = "Flow-control for ngx_mail_auth_http_module"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/norstone-tech/sluice"
 
 [dependencies]
 abpl = {version = "0.1.4", features = ["derive_error", "app", "http", "serde"]}
