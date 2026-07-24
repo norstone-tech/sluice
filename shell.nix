@@ -1,4 +1,6 @@
-{ pkgs ? import <nixpkgs> {} }:
+{
+  pkgs ? import <nixpkgs> { },
+}:
 
 pkgs.mkShell {
   name = "abpl-dev";
@@ -28,6 +30,9 @@ pkgs.mkShell {
 
     # nginx with mail proxy modules (IMAP/POP3/SMTP proxy support)
     (nginx.override { withMail = true; })
+
+    # formatter for default.nix / module.nix / shell.nix itself
+    nixfmt
 
     # uncomment below if we need native dependencies for some reason
     # rustPlatform.rustLibSrc
