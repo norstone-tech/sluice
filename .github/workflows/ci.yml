@@ -124,10 +124,10 @@ jobs:
           purge-created: 0
           purge-primary-key: never
 
-      - run: nix-shell --run "nixfmt --check *.nix"
+      - run: nix-shell --run "nixfmt --check *.nix nix/*/*.nix"
 
       - name: Build the sluice package derivation
-        run: nix-build -E 'with import <nixpkgs> {}; callPackage ./default.nix {}' --no-out-link
+        run: nix-build -A packages.sluice --no-out-link
 
       - name: Evaluate the NixOS module
         run: |
@@ -135,7 +135,7 @@ jobs:
             let
               nixos = import <nixpkgs/nixos> {
                 configuration = { pkgs, ... }: {
-                  imports = [ ./module.nix ];
+                  imports = [ ./nix/modules/sluice.nix ];
                   services.sluice = {
                     enable = true;
                     proxyMap."example.com" = "10.0.0.5:25";

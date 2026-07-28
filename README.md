@@ -66,17 +66,24 @@ The two `proxy_*` directives matter more here than they would with a typical mai
 
 ### NixOS
 
-Create a `sluice.nix` file:
+Pin sluice as a dependency with [`lon`](https://github.com/nix-community/lon) (`nix-shell -p lon`, or add it to your own `shell.nix`):
+
+```sh
+lon add github norstone-tech/sluice -r v0.1.0 --frozen
+```
+
+That writes/updates `lon.lock` and (re)generates `lon.nix` next to it — commit both. Swap `v0.1.0` for whichever tag or commit you want to track.
+
+Then reference it from your `configuration.nix`:
 
 ```nix
-{ config, pkgs, ... }:
+{ pkgs, lib, ... }:
 let
-  sluice-src = builtins.fetchGit {
-    url = "https://github.com/norstone-tech/sluice.git";
-    rev = "PUT_COMMIT_SHA_HERE";
-  };
-in {
-  imports = [ "${sluice-src}/module.nix" ];
+  sources = import ./lon.nix;
+  sluice = import sources.sluice { inherit pkgs; };
+in
+{
+  imports = [ sluice.nixosModules.sluice ];
 
   services.sluice = {
     enable = true;
@@ -85,15 +92,7 @@ in {
 }
 ```
 
-Then import it into your `configuration.nix`:
-
-```nix
-{
-  imports = [ ./sluice.nix ];
-}
-```
-
-See `module.nix` for the full option list (`bind`, `logFilter`, `proxyMap`, `package`).
+See [`nix/modules/sluice.nix`](nix/modules/sluice.nix) for the full option list (`bind`, `logFilter`, `proxyMap`, `package`).
 
 nginx itself isn't built with mail proxy support by default on NixOS — same as upstream nixpkgs, `services.nginx` needs the module explicitly enabled. The directives below are the same ones explained in the nginx section above:
 
@@ -118,7 +117,7 @@ Point `auth_http` at wherever `services.sluice.bind` is listening.
 
 ### Other platforms
 
-`default.nix` is a standard `rustPlatform.buildRustPackage` derivation (`nix-build -E 'with import <nixpkgs> {}; callPackage ./default.nix {}'`), or build with plain `cargo build --release` and run the resulting binary with a config path as its only argument.
+`nix-build -A packages.sluice` builds the `rustPlatform.buildRustPackage` derivation at [`nix/packages/sluice.nix`](nix/packages/sluice.nix), or build with plain `cargo build --release` and run the resulting binary with a config path as its only argument.
 
 ## Development
 
@@ -129,7 +128,7 @@ nix-shell
 cargo test    # runs a real nginx + real sluice HTTP server e2e suite, see tests/support/
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
-nixfmt --check *.nix
+nixfmt --check *.nix nix/*/*.nix
 ```
 
 CI (`.github/workflows/ci.yml`) runs all of the above on every push/PR.

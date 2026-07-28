@@ -25,13 +25,13 @@ pkgs.mkShell {
     # rust-analyzer
     rust-analyzer
 
-    # vscode complains if I don't have this?
+    # claude loves using this
     python3
 
     # nginx with mail proxy modules (IMAP/POP3/SMTP proxy support)
     (nginx.override { withMail = true; })
 
-    # formatter for default.nix / module.nix / shell.nix itself
+    # formatter for the *.nix files throughout the repo
     nixfmt
 
     # uncomment below if we need native dependencies for some reason

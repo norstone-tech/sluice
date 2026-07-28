@@ -23,8 +23,8 @@ in
 
     package = lib.mkOption {
       type = lib.types.package;
-      default = pkgs.callPackage ./default.nix { };
-      defaultText = lib.literalExpression "pkgs.callPackage ./default.nix {}";
+      default = pkgs.callPackage ../packages/sluice.nix { };
+      defaultText = lib.literalExpression "pkgs.callPackage ../packages/sluice.nix {}";
       description = "The sluice package to use.";
     };
 

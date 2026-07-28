@@ -1,22 +1,16 @@
 {
-  lib,
-  rustPlatform,
+  pkgs ? import <nixpkgs> { },
 }:
-rustPlatform.buildRustPackage {
-  pname = "sluice";
-  version = "0.1.0";
+let
+  inherit (pkgs) lib;
+in
+rec {
+  packages = lib.recurseIntoAttrs (import ./nix/packages { inherit pkgs; });
 
-  src = lib.cleanSource ./.;
-
-  cargoLock.lockFile = ./Cargo.lock;
-
-  # The test suite spins up a real nginx process and binds real loopback sockets end-to-end
-  # (see tests/support/); that's not something to run inside the Nix build sandbox. CI runs it
-  # instead (.github/workflows/ci.yml).
-  doCheck = false;
-
-  meta = {
-    description = "Flow-control for ngx_mail_auth_http_module";
-    mainProgram = "sluice";
+  nixosModules.sluice = {
+    imports = [ ./nix/modules/sluice.nix ];
+    config.services.sluice.package = lib.mkDefault packages.sluice;
   };
+
+  passthru = { inherit pkgs; };
 }
