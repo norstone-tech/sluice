@@ -39,6 +39,10 @@ pub enum ProxyTableLookupErrorKind {
 	#[cause(email_address::Error)]
 	#[abpl_provider(smtp_status((StatusClass::PermFail, StatusSubject::Addressing, 1, 3).into()))]
 	InvalidRcpt,
+	#[abpl_provider(smtp_status((StatusClass::TempFail, StatusSubject::MailSystem, 51, 5).into()))]
+	ProtocolUnknown,
+	#[abpl_provider(smtp_status((StatusClass::PermFail, StatusSubject::SecurityOrPolicy, 50, 0).into()))]
+	ProtocolLookupFailed,
 }
 impl Display for ProxyTableLookupErrorKind {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -46,9 +50,13 @@ impl Display for ProxyTableLookupErrorKind {
 			Self::LookupFailed => {
 				f.write_str("neither the sending nor receiving domain is associated with this server")
 			},
-			Self::AuthLookupFailed => f.write_str("the sending domain is associated with this server"),
+			Self::AuthLookupFailed => f.write_str("this server does not handle logins for the specified mail domain"),
 			Self::InvalidFrom => f.write_str("invalid sender"),
 			Self::InvalidRcpt => f.write_str("invalid recipient"),
+			Self::ProtocolUnknown => f.write_str("sluice doesn't know of the protocol given by nginx"),
+			Self::ProtocolLookupFailed => {
+				f.write_str("the current mail protocol cannot be used with the specified mail domain")
+			},
 		}
 	}
 }

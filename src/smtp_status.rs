@@ -4,7 +4,7 @@ use std::fmt::Display;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum StatusClass {
 	// Success = 2,
-	// TempFail = 4,
+	TempFail = 4,
 	// Intermediate omitted as that doesn't generalize to basic and extended code., Plus we don't actually ingest mail.
 	PermFail = 5,
 }
@@ -20,7 +20,7 @@ pub enum StatusSubject {
 	// Other = 0,
 	Addressing = 1,
 	// Mailbox = 2,
-	// MailSystem = 3,
+	MailSystem = 3,
 	// NetworkAndRouting = 4,
 	// MailDeliveryProtocol = 5,
 	// MessageContentOrMedia = 6,
