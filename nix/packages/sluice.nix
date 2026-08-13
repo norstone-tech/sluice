@@ -4,7 +4,7 @@
 }:
 rustPlatform.buildRustPackage {
   pname = "sluice";
-  version = "0.1.0";
+  version = (fromTOML (builtins.readFile ../../Cargo.toml)).package.version;
 
   src = lib.cleanSource ../..;
 
