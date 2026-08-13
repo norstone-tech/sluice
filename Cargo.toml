@@ -1,6 +1,6 @@
 [package]
 name = "mail-sluice"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Flow-control for ngx_mail_auth_http_module"
 license = "AGPL-3.0-or-later"
