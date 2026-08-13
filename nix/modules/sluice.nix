@@ -50,19 +50,36 @@ in
     };
 
     proxyMap = lib.mkOption {
-      type = lib.types.attrsOf lib.types.str;
+      type = lib.types.attrsOf (lib.types.either lib.types.str (lib.types.attrsOf lib.types.str));
       default = { };
       description = ''
-        Map from a mailbox domain to the upstream SMTP server address (`host:port`) sluice
-        tells nginx to proxy that session to.
+        Map from a mailbox domain to the upstream server address (`host:port`) sluice tells
+        nginx to proxy that session to.
 
         The domain used to look up an entry is, in priority order: the authenticated user's
         own domain (authenticated connections only), the mail recipient's domain, then the
         unauthenticated mail sender's domain.
+
+        A domain's value is either a single address used for every protocol, or an attribute
+        set mapping a protocol to its own address. Valid protocol names are `smtp`,
+        `smtp_authenticated`, `imap` and `pop3`; anything else is rejected by sluice at
+        startup rather than at evaluation time.
+
+        `smtp_authenticated` covers SMTP sessions that authenticated, letting you send them
+        to a submission port while unauthenticated mail goes to port 25 - useful because
+        nginx doesn't tell sluice which port the client connected to, and some servers
+        (stalwart, for one) apply different rules per port. It falls back to the `smtp` entry
+        when unset, so you only need to name it if you actually want the two split. The
+        fallback is one-way: an `smtp_authenticated` entry is never used for an
+        unauthenticated session.
       '';
       example = {
         "example.com" = "10.0.0.5:25";
-        "example.org" = "10.0.0.6:25";
+        "example.org" = {
+          smtp = "10.0.0.6:25";
+          smtp_authenticated = "10.0.0.6:587";
+          imap = "10.0.0.6:143";
+        };
       };
     };
   };

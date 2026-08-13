@@ -16,6 +16,23 @@ sluice exposes `GET /auth`, the endpoint nginx's `auth_http` directive calls. Th
 
 Authenticated connections never fall back to the recipient's or sender's domain - only the authenticated identity's own domain is trusted for routing. Invalid or unparseable addresses are rejected outright rather than silently falling through to the next priority level.
 
+### Routing per protocol
+
+Once a domain is matched, its entry can resolve to a single upstream for everything, or to a different upstream per protocol. sluice takes the protocol from nginx's `Auth-Protocol` header, with one addition of its own:
+
+| Protocol | When it's used |
+| --- | --- |
+| `smtp` | An SMTP session that did not authenticate |
+| `smtp_authenticated` | An SMTP session that did — falls back to `smtp` when unset |
+| `imap` | An IMAP session |
+| `pop3` | A POP3 session |
+
+`smtp_authenticated` isn't a protocol nginx knows about; sluice synthesizes it from `Auth-Method`. The reason is that some mail servers behave differently on port 25 than on 587 — stalwart, for instance, only runs SPF/DKIM/DMARC checks on 25, and only accepts submission from logged-in clients on 587 — but nginx doesn't tell `auth_http` which port the client connected to. Splitting the entry recovers that distinction, letting you point authenticated sessions at the submission port and everything else at 25.
+
+The `smtp_authenticated` → `smtp` fallback is one-way by design. An `smtp_authenticated` entry is never used to route an unauthenticated session, since that would deliver unauthenticated inbound mail to a submission endpoint — the exact thing splitting the ports is meant to prevent.
+
+A domain that's matched but has no entry for the protocol in play is refused with `550 5.7.0`, distinct from the `550 5.7.1` an entirely unmanaged domain gets.
+
 ## Configuration
 
 ### sluice
@@ -29,11 +46,17 @@ log_filter = "sluice=info,warn"
 [proxy_map]
 "example.com" = "10.0.0.5:25"
 "example.org" = "10.0.0.6:25"
+
+# Or, to route a domain's sessions per protocol:
+[proxy_map."example.net"]
+smtp = "10.0.0.7:25"
+smtp_authenticated = "10.0.0.7:587"
+imap = "10.0.0.7:143"
 ```
 
 - `bind` — addresses the HTTP server listens on. Each entry is either `host:port` or `unix://path/to.sock`.
 - `log_filter` — a [`tracing-subscriber` `EnvFilter`](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html) directive.
-- `proxy_map` — the routing table described above.
+- `proxy_map` — the routing table described above. Each domain maps either to a single `host:port` used for every protocol, or to a table of [per-protocol addresses](#routing-per-protocol). Both forms can appear in the same file.
 
 Sending `SIGHUP` reloads the config in place (no restart, no dropped connections) and re-reads the same file path the process was started with.
 
@@ -88,6 +111,13 @@ in
   services.sluice = {
     enable = true;
     proxyMap."example.com" = "10.0.0.5:25";
+
+    # Or, to route a domain's sessions per protocol:
+    proxyMap."example.net" = {
+      smtp = "10.0.0.7:25";
+      smtp_authenticated = "10.0.0.7:587";
+      imap = "10.0.0.7:143";
+    };
   };
 }
 ```

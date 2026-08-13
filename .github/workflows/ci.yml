@@ -130,6 +130,9 @@ jobs:
         run: nix-build -A packages.sluice --no-out-link
 
       - name: Evaluate the NixOS module
+        # Exercises both `proxyMap` value forms: a bare address string, and the per-protocol
+        # attribute set. The latter is only expressible since `proxyMap` stopped being
+        # `attrsOf str`, so evaluating just the flat form would not catch a regression there.
         run: |
           nix-instantiate --eval --strict -E '
             let
@@ -139,6 +142,11 @@ jobs:
                   services.sluice = {
                     enable = true;
                     proxyMap."example.com" = "10.0.0.5:25";
+                    proxyMap."example.org" = {
+                      smtp = "10.0.0.6:25";
+                      smtp_authenticated = "10.0.0.6:587";
+                      imap = "10.0.0.6:143";
+                    };
                   };
                   boot.loader.grub.enable = false;
                   boot.loader.systemd-boot.enable = false;
