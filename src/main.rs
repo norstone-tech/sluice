@@ -1,9 +1,11 @@
 use abpl::app::{MainResult, ReloadableService, axum::HotReloadingAxumService, service_main};
 use sluice::{
+	VERSION_INFO,
 	config::{SluiceConfig, SluiceState},
 	error::ServiceError,
 	http,
 };
+use tracing::info;
 
 struct SluiceService {
 	axum: HotReloadingAxumService<SluiceState>,
@@ -21,6 +23,7 @@ impl ReloadableService for SluiceService {
 			|_| http::build_router(),
 		);
 		axum.bind_sockets(config.bind.iter().cloned())?;
+		info!("started: {VERSION_INFO}");
 		Ok(Self { axum })
 	}
 
@@ -29,6 +32,7 @@ impl ReloadableService for SluiceService {
 			proxy_map: config.proxy_map,
 		});
 		self.axum.bind_sockets(config.bind.iter().cloned())?;
+		info!("reloaded!");
 		Ok(())
 	}
 

@@ -9,6 +9,7 @@ use axum::{
 };
 use email_address::EmailAddress;
 use lazy_regex::regex_captures;
+use tracing::{info, warn};
 
 use crate::{
 	config::{MailProtocol, SluiceState},
@@ -40,7 +41,12 @@ async fn auth(
 	let mut mail_protocol = headers
 		.get("Auth-Protocol")
 		.and_then(|header_value| header_value.to_str().ok())
-		.map(|header_value| MailProtocol::from_str(header_value).map_err(|_| ProxyTableLookupError::protocol_unknown()))
+		.map(|header_value| {
+			MailProtocol::from_str(header_value).map_err(|_| {
+				warn!("nginx gave an unknown mail protocol {header_value}");
+				ProxyTableLookupError::protocol_unknown()
+			})
+		})
 		.ok_or(ProxyTableLookupError::protocol_unknown())??;
 	mail_protocol.set_authenticated(authenticated_connection);
 
@@ -53,11 +59,14 @@ async fn auth(
 				.and_then(|from| from.to_str().ok())
 				.unwrap_or_default(),
 		)
+		.inspect_err(|err| warn!("nginx gave an invalid Auth-User: {err}"))
 		.map_err_invalid_from()?;
 		if let Some(upstreams) = state.proxy_map.get(&from.domain().to_ascii_lowercase()) {
 			let server = upstreams.get(&mail_protocol)?;
+			info!("login \"{from}\" -> {server} via {mail_protocol}");
 			return Ok(ProxyTableResponse { server });
 		};
+		warn!("no configured upstream for user \"{from}\" via {mail_protocol}");
 		Err(ProxyTableLookupError::auth_lookup_failed())
 	} else {
 		// this fails to parse on an empty string, the resulting error is slightly opaque, but only someone who's
@@ -69,9 +78,11 @@ async fn auth(
 				.and_then(|from| regex_captures!(r"^RCPT TO:\s*<\s*(.*)\s*>\s*", from).map(|(_, from)| from))
 				.unwrap_or_default(),
 		)
+		.inspect_err(|err| warn!("nginx gave an invalid mail recipient: {err}"))
 		.map_err_invalid_rcpt()?;
 		if let Some(upstreams) = state.proxy_map.get(&rcpt.domain().to_ascii_lowercase()) {
 			let server = upstreams.get(&mail_protocol)?;
+			info!("recipient \"{rcpt}\" -> {server} via {mail_protocol}");
 			return Ok(ProxyTableResponse { server });
 		};
 		let from_unchecked = headers
@@ -90,8 +101,10 @@ async fn auth(
 			) {
 			// We're going to assume that the upstream server can handle unauthenticated from addresses correctly.
 			let server = upstreams.get(&mail_protocol)?;
+			info!("sender \"{from_unchecked}\" -> {server} via {mail_protocol}");
 			return Ok(ProxyTableResponse { server });
 		}
+		warn!("no configured upstream for recipient \"{from_unchecked}\" or sender \"{rcpt}\" via {mail_protocol}");
 		Err(ProxyTableLookupError::lookup_failed())
 	}
 }
@@ -107,7 +120,6 @@ impl IntoResponse for ProxyTableResponse {
 				("Auth-Status", "OK".to_string()),
 				("Auth-Server", self.server.ip().to_string()),
 				("Auth-Port", self.server.port().to_string()),
-				// Do I need `Auth-Pass` here?
 			]),
 		)
 			.into_response()
