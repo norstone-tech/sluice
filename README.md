@@ -94,10 +94,10 @@ default (see [`ngx_mail_proxy_module`](https://nginx.org/en/docs/mail/ngx_mail_p
 Pin sluice as a dependency with [`lon`](https://github.com/nix-community/lon) (`nix-shell -p lon`, or add it to your own `shell.nix`):
 
 ```sh
-lon add github norstone-tech/sluice -r v0.1.1 --frozen
+lon add github norstone-tech/sluice -r v0.1.2 --frozen
 ```
 
-That writes/updates `lon.lock` and (re)generates `lon.nix` next to it. Swap `v0.1.1` for whichever tag or commit you want to track.
+That writes/updates `lon.lock` and (re)generates `lon.nix` next to it. Swap `v0.1.2` for whichever tag or commit you want to track.
 
 Then reference it from your `configuration.nix`. See [`nix/modules/sluice.nix`](nix/modules/sluice.nix) for the full option list.
 
