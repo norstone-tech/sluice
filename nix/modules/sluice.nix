@@ -45,7 +45,14 @@ in
     logFilter = lib.mkOption {
       type = lib.types.str;
       default = "sluice=info,abpl=info,warn";
-      description = "logging verbosity of sluice and its dependant libraries";
+      description = ''
+        logging verbosity of sluice and its dependant libraries. Some example configs:
+
+        - `sluice=info,abpl=info,warn`: Sluice will log on startup, reload, and every
+          time a lookup event happens.
+        - `warn`: Sluice will log when a lookup is unsuccessful.
+        - `error`: Silence... unless something bad happens.
+      '';
       example = "sluice=debug,warn";
     };
 
@@ -56,22 +63,22 @@ in
         Map from a mailbox domain to the upstream server address (`host:port`) sluice tells
         nginx to proxy that session to.
 
-        The domain used to look up an entry is, in priority order: the authenticated user's
-        own domain (authenticated connections only), the mail recipient's domain, then the
-        unauthenticated mail sender's domain.
+        The domain used to look up an entry is, in priority order:
+        - the authenticated user's own domain (authenticated connections only)
+        - the mail recipient's domain
+        - the unauthenticated mail sender's domain.
 
-        A domain's value is either a single address used for every protocol, or an attribute
-        set mapping a protocol to its own address. Valid protocol names are `smtp`,
-        `smtp_authenticated`, `imap` and `pop3`; anything else is rejected by sluice at
-        startup rather than at evaluation time.
+        A domain's value is either a single address+port, which assumes nginx is only proxying
+        a single procol used for every protocol, or an attribute set mapping a protocol to its
+        own address+port. Valid protocol names are `smtp`, `smtp_authenticated`, `imap` and
+        `pop3`.
 
-        `smtp_authenticated` covers SMTP sessions that authenticated, letting you send them
-        to a submission port while unauthenticated mail goes to port 25 - useful because
-        nginx doesn't tell sluice which port the client connected to, and some servers
-        (stalwart, for one) apply different rules per port. It falls back to the `smtp` entry
-        when unset, so you only need to name it if you actually want the two split. The
-        fallback is one-way: an `smtp_authenticated` entry is never used for an
-        unauthenticated session.
+        Since nginx doesn't tell sluice which port it is proxying, and some mail servers may
+        behave differently based on which port SMTP is using (i.e. 25 vs 587) sluice provides
+        a workaround via `smtp_authenticated`. This way you can proxy authenticated
+        connections to port 587, and unauthenticated connections to port 25. If
+        `smtp_authenticated` isn't specified, then the `smtp` entry will be used for
+        authenticated connections too.
       '';
       example = {
         "example.com" = "10.0.0.5:25";

@@ -4,65 +4,60 @@
 
 Simple flow-control for [`ngx_mail_auth_http_module`](https://nginx.org/en/docs/mail/ngx_mail_auth_http_module.html)
 
-nginx's mail proxy asks sluice one question per SMTP session, "which upstream server should this go to?", and sluice answers it from a small domain-to-server routing table.
+nginx's mail proxy asks sluice one question per SMTP session, "which upstream server should this go to?", and sluice
+answers it from a small domain-to-server routing table.
 
 ## How routing works
 
-sluice exposes `GET /auth`, the endpoint nginx's `auth_http` directive calls. The domain used to look an entry up in `proxy_map`, in priority order:
+sluice exposes `GET /auth`, the endpoint nginx's `auth_http` directive calls. The domain used to look an entry up in
+`proxy_map`.
+- For authenticated connections (SMTP `AUTH`, IMAP, POP3), the authenticated user's domain is used
+    - Note that sluice requires e-mail address like usernames, and will reject stuff like `DOMAIN\USER`
+    - Since nginx will ask sluice for an upstream before `MAIL FROM` and `RCPT TO` on an SMTP authenticated connection,
+      there is no fallthrough to using these lookups. Sluice assumes that this limitation will always be true and
+      doesn't even attempt to get the values for `MAIL FROM` and `RCPT TO` in that case.
+- For unauthenticated connections, lookups are attempted in the following order of priority
+    1. The mail recipient's domain (SMTP `RCPT TO`)
+    2. The mail sender's domain (SMTP `MAIL FROM`)
 
-1. **The authenticated user's own domain** — for authenticated connections (nginx sends this at `AUTH` time, before `MAIL FROM`/`RCPT TO` even exist).
-2. **The mail recipient's domain** (`RCPT TO`) — for unauthenticated connections.
-3. **The mail sender's domain** (`MAIL FROM`), as a fallback if the recipient's domain isn't managed by this server.
-
-Authenticated connections never fall back to the recipient's or sender's domain - only the authenticated identity's own domain is trusted for routing. Invalid or unparseable addresses are rejected outright rather than silently falling through to the next priority level.
-
-### Routing per protocol
-
-Once a domain is matched, its entry can resolve to a single upstream for everything, or to a different upstream per protocol. sluice takes the protocol from nginx's `Auth-Protocol` header, with one addition of its own:
-
-| Protocol | When it's used |
-| --- | --- |
-| `smtp` | An SMTP session that did not authenticate |
-| `smtp_authenticated` | An SMTP session that did — falls back to `smtp` when unset |
-| `imap` | An IMAP session |
-| `pop3` | A POP3 session |
-
-`smtp_authenticated` isn't a protocol nginx knows about; sluice synthesizes it from `Auth-Method`. The reason is that some mail servers behave differently on port 25 than on 587 — stalwart, for instance, only runs SPF/DKIM/DMARC checks on 25, and only accepts submission from logged-in clients on 587 — but nginx doesn't tell `auth_http` which port the client connected to. Splitting the entry recovers that distinction, letting you point authenticated sessions at the submission port and everything else at 25.
-
-The `smtp_authenticated` → `smtp` fallback is one-way by design. An `smtp_authenticated` entry is never used to route an unauthenticated session, since that would deliver unauthenticated inbound mail to a submission endpoint — the exact thing splitting the ports is meant to prevent.
-
-A domain that's matched but has no entry for the protocol in play is refused with `550 5.7.0`, distinct from the `550 5.7.1` an entirely unmanaged domain gets.
+> [!WARNING]
+> 
+> Sluice **does not** validate credentials nor mail. It's only job is to tell nginx what upstream server to route to.
+> The **upstream server is still expected to validate credentials and take measures against fraudulent mail**.
 
 ## Configuration
 
 ### sluice
 
-sluice takes a single cli argument: the path to a TOML config file. (`sluice path/to/config.toml`)
+Sluice supports being started as a systemd service with `Type=notify-reload`. Reloading Sluice will reload the config
+in-place without terminating any connections. Seamless.
+
+It takes a single cli argument: the path to a TOML config file. (`sluice path/to/config.toml`)
 
 ```toml
+# addresses the HTTP server listens on. Each entry is either `host:port` or `unix://path/to.sock`.
 bind = ["127.0.0.1:8080"]
-log_filter = "sluice=info,warn"
+# logging level for sluice and its dependencies. By default sluice and its service library is at the `info` level with
+# all other dependencies being at the `warn` level. Valid logging levels are, in order of verbosity: `error`, `warn`,
+# `info`, `debug`, `trace`.
+log_filter = "sluice=info,abpl=info,warn"
 
 [proxy_map]
+# Use this format if only 1 protocol is being proxied by nginx, like SMTP
 "example.com" = "10.0.0.5:25"
 "example.org" = "10.0.0.6:25"
 
-# Or, to route a domain's sessions per protocol:
+# Use this format if multiple protocols are being proxied by nginx
 [proxy_map."example.net"]
 smtp = "10.0.0.7:25"
 smtp_authenticated = "10.0.0.7:587"
 imap = "10.0.0.7:143"
+pop3 = "10.0.0.7:110"
 ```
-
-- `bind` — addresses the HTTP server listens on. Each entry is either `host:port` or `unix://path/to.sock`.
-- `log_filter` — a [`tracing-subscriber` `EnvFilter`](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html) directive.
-- `proxy_map` — the routing table described above. Each domain maps either to a single `host:port` used for every protocol, or to a table of [per-protocol addresses](#routing-per-protocol). Both forms can appear in the same file.
-
-Sending `SIGHUP` reloads the config in place (no restart, no dropped connections) and re-reads the same file path the process was started with.
 
 ### nginx
 
-nginx needs to be built with mail proxy support (`--with-mail`) — not every nginx build includes it; see the NixOS section under Deployment for how to get that on NixOS specifically. Point `auth_http` at wherever sluice is listening:
+nginx needs to be built with mail proxy support. (`--with-mail`) Point `auth_http` at wherever sluice is listening:
 
 ```nginx
 mail {
@@ -71,6 +66,8 @@ mail {
     proxy_smtp_auth on;
     proxy_pass_error_message on;
 
+    # Of course you shouldn't actually accept plaintext logins in unencrypted connections, this is just a minimal
+    # example.
     server {
         listen 25;
         protocol smtp;
@@ -79,11 +76,16 @@ mail {
 }
 ```
 
-The two `proxy_*` directives matter more here than they would with a typical mail proxy setup, and neither is nginx's default:
+The two `proxy_*` directives matter more here than they would with a typical mail proxy setup, and neither is nginx's
+default (see [`ngx_mail_proxy_module`](https://nginx.org/en/docs/mail/ngx_mail_proxy_module.html)):
 
-**`proxy_smtp_auth on;`** (default `off`, [`ngx_mail_proxy_module`](https://nginx.org/en/docs/mail/ngx_mail_proxy_module.html)) — **sluice never checks the AUTH credentials itself.** It only routes based on domain, and treats any non-`none` `Auth-Method` as sufficient to look up by the authenticated user's domain. The upstream server is what actually has to validate the password, which means nginx has to replay the client's `AUTH` command to it - without this directive, every upstream sees an unauthenticated connection regardless of what the client sent. Since sluice's `/auth` response never sets `Auth-User`/`Auth-Pass`, nginx replays the client's own original credentials to the backend unchanged (per [`ngx_mail_auth_http_module`](https://nginx.org/en/docs/mail/ngx_mail_auth_http_module.html): an `Auth-User`/`Auth-Pass` in sluice's response would override them, but sluice doesn't send either). One side effect: `xclient` is `on` by default, and `proxy_smtp_auth on` suppresses its `LOGIN=` parameter — the real `AUTH` command is the thing that carries the identity to the backend once this is enabled, not XCLIENT.
-
-**`proxy_pass_error_message on;`** (also default `off`) matters for the same reason. nginx's docs frame a backend rejecting an already-"successful" auth as an edge case ("usually...means some internal error has occurred") worth surfacing only for quirky POP3 servers - but with sluice, that's backwards: since sluice never validates the password, a wrong password is *only* ever caught by the backend rejecting the replayed `AUTH`, which is the normal path here, not an anomaly. Without this directive, the client just sees an opaque nginx error instead of the backend's actual "invalid credentials" message.
+- `proxy_smtp_auth on;` (default `off`)
+    - As noted above, Sluice never checks the AUTH credentials itself. This means we need nginx to replay
+      authentication commands to the upstream server.
+- `proxy_pass_error_message on;` (default `off`)
+    - Even though nginx's docs frame a backend rejecting an already "successful" auth as an edge case, again, Sluice
+      doesn't actually do auth, we're still relying on the upstream server to do the authenticating. Therefore, we must
+      pass along the actual rejection messages.
 
 ## Deployment
 
@@ -92,12 +94,12 @@ The two `proxy_*` directives matter more here than they would with a typical mai
 Pin sluice as a dependency with [`lon`](https://github.com/nix-community/lon) (`nix-shell -p lon`, or add it to your own `shell.nix`):
 
 ```sh
-lon add github norstone-tech/sluice -r v0.1.0 --frozen
+lon add github norstone-tech/sluice -r v0.1.1 --frozen
 ```
 
-That writes/updates `lon.lock` and (re)generates `lon.nix` next to it — commit both. Swap `v0.1.0` for whichever tag or commit you want to track.
+That writes/updates `lon.lock` and (re)generates `lon.nix` next to it. Swap `v0.1.1` for whichever tag or commit you want to track.
 
-Then reference it from your `configuration.nix`:
+Then reference it from your `configuration.nix`. See [`nix/modules/sluice.nix`](nix/modules/sluice.nix) for the full option list.
 
 ```nix
 { pkgs, lib, ... }:
@@ -110,6 +112,7 @@ in
 
   services.sluice = {
     enable = true;
+    bind = [ "127.0.0.1:8080" ];
     proxyMap."example.com" = "10.0.0.5:25";
 
     # Or, to route a domain's sessions per protocol:
@@ -119,43 +122,56 @@ in
       imap = "10.0.0.7:143";
     };
   };
+
+  services.nginx = {
+    enable = true;
+    # NixOS doesn't build nginx with mail support by default. This is how to enable it.
+    package = pkgs.nginx.override { withMail = true; };
+
+    # nixpkgs doesn't provide "convenient" ways of configuring the mail proxy like it does with web proxies, so you'll
+    # have to do something like this.
+    appendConfig = ''
+      mail {
+        server_name mail.example.com;
+        auth_http http://127.0.0.1:8080/auth;
+        proxy_smtp_auth on;
+        proxy_pass_error_message on;
+
+        # Of course you shouldn't actually accept plaintext logins in unencrypted connections, this is just a minimal
+        # example.
+        server {
+          listen 25;
+          protocol smtp;
+          smtp_auth login plain;
+        }
+      }
+    '';
+  };
+
 }
 ```
 
-See [`nix/modules/sluice.nix`](nix/modules/sluice.nix) for the full option list (`bind`, `logFilter`, `proxyMap`, `package`).
-
-nginx itself isn't built with mail proxy support by default on NixOS — same as upstream nixpkgs, `services.nginx` needs the module explicitly enabled. The directives below are the same ones explained in the nginx section above:
-
-```nix
-services.nginx.package = pkgs.nginx.override { withMail = true; };
-
-services.nginx.mailConfig = ''
-  server_name mail.example.com;
-  auth_http http://127.0.0.1:8080/auth;
-  proxy_smtp_auth on;
-  proxy_pass_error_message on;
-
-  server {
-    listen 25;
-    protocol smtp;
-    smtp_auth login plain;
-  }
-'';
-```
-
-Point `auth_http` at wherever `services.sluice.bind` is listening.
-
 ### Other platforms
 
-`nix-build -A packages.sluice` builds the `rustPlatform.buildRustPackage` derivation at [`nix/packages/sluice.nix`](nix/packages/sluice.nix), or build with plain `cargo build --release` and run the resulting binary with a config path as its only argument.
+Sluice doesn't have any system dependencies beyond what Rust needs for its stdlib, so you can...
+- `cargo install mail-sluice`
+- Clone this repo, then `cargo build --release`
+
+I don't provide prebuilds right now, though that may change in the future.
 
 ## Development
 
-`shell.nix` provides the full dev environment (Rust toolchain, nginx built with mail proxy support, `nixfmt`, `cargo-llvm-cov`):
+`shell.nix` provides the full dev environment, so after cloning this repo and `cd`-ing into it, you just need to run
+`nix-shell` to get a shell with the Rust toolchain, a build of nginx with mail support, and other validation tools.
 
 ```sh
+# get the tools
 nix-shell
-cargo test    # runs a real nginx + real sluice HTTP server e2e suite, see tests/support/
+
+# # runs a real nginx + real sluice HTTP server e2e suite, see tests/support/
+cargo test 
+
+# linty linty
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 nixfmt --check *.nix nix/*/*.nix
