@@ -9,16 +9,39 @@ answers it from a small domain-to-server routing table.
 
 ## How routing works
 
-sluice exposes `GET /auth`, the endpoint nginx's `auth_http` directive calls. The domain used to look an entry up in
-`proxy_map`.
-- For authenticated connections (SMTP `AUTH`, IMAP, POP3), the authenticated user's domain is used
+sluice exposes `GET /auth`, the endpoint nginx's `auth_http` directive calls. The domain or client IP address used to
+look an entry up in `proxy_map`.
+- For authenticated connections (SMTP `AUTH`, IMAP, POP3), the authenticated user's domain is tried first, then the
+  client's IP address
     - Note that sluice requires e-mail address like usernames, and will reject stuff like `DOMAIN\USER`
     - Since nginx will ask sluice for an upstream before `MAIL FROM` and `RCPT TO` on an SMTP authenticated connection,
       there is no fallthrough to using these lookups. Sluice assumes that this limitation will always be true and
       doesn't even attempt to get the values for `MAIL FROM` and `RCPT TO` in that case.
 - For unauthenticated connections, lookups are attempted in the following order of priority
     1. The mail recipient's domain (SMTP `RCPT TO`)
-    2. The mail sender's domain (SMTP `MAIL FROM`)
+    2. The client's IP address (nginx's `Client-IP`)
+    3. The mail sender's domain (SMTP `MAIL FROM`)
+
+IP addresses are only ever matched against the address of the connecting client. An IP address written into the domain
+part of an e-mail address (`user@[192.0.2.1]`) never matches an IP entry. This is intentional, otherwise a sender could
+choose their own route.
+
+The intended use for IP entries is a trusted outbound relay: mail for domains sluice manages is routed to those
+domains' servers, and any other recipient from a listed client IP is handed to that client's upstream (e.g. a relay
+server that forwards to the outside world).
+
+> [!WARNING]
+> 
+> IP keys should only be used for trusted outbound relays. Everything that client sends to a domain sluice doesn't
+> manage goes to that entry's upstream.
+
+> [!NOTE]
+> 
+> `Client-IP` is the address of whoever connected to nginx. If nginx sits behind a load balancer or proxy, that is the
+> proxy's address unless nginx is told to use the real one: enable `proxy_protocol` on the `listen` directive and trust
+> the proxy with [`set_real_ip_from`](https://nginx.org/en/docs/mail/ngx_mail_realip_module.html). Without it, an IP
+> entry matches every client behind that proxy. For nginx listening on a unix socket, there is no IP to match, and only
+> domain entries apply.
 
 > [!WARNING]
 > 
@@ -46,6 +69,10 @@ log_filter = "sluice=info,abpl=info,warn"
 # Use this format if only 1 protocol is being proxied by nginx, like SMTP
 "example.com" = "10.0.0.5:25"
 "example.org" = "10.0.0.6:25"
+# A key can also be a client's IP address (IPv4 or IPv6, not bracketed). IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`)
+# are treated as the plain IPv4 address. Keys that are neither an IP address nor a valid domain name are a config error.
+# Domains are case-insensitive, and internationalized domains must be written in punycode.
+"192.0.2.10" = "10.0.0.9:25"
 
 # Use this format if multiple protocols are being proxied by nginx
 [proxy_map."example.net"]
@@ -94,10 +121,10 @@ default (see [`ngx_mail_proxy_module`](https://nginx.org/en/docs/mail/ngx_mail_p
 Pin sluice as a dependency with [`lon`](https://github.com/nix-community/lon) (`nix-shell -p lon`, or add it to your own `shell.nix`):
 
 ```sh
-lon add github norstone-tech/sluice -r v0.1.2 --frozen
+lon add github norstone-tech/sluice -r v0.1.3 --frozen
 ```
 
-That writes/updates `lon.lock` and (re)generates `lon.nix` next to it. Swap `v0.1.2` for whichever tag or commit you want to track.
+That writes/updates `lon.lock` and (re)generates `lon.nix` next to it. Swap `v0.1.3` for whichever tag or commit you want to track.
 
 Then reference it from your `configuration.nix`. See [`nix/modules/sluice.nix`](nix/modules/sluice.nix) for the full option list.
 
@@ -114,6 +141,9 @@ in
     enable = true;
     bind = [ "127.0.0.1:8080" ];
     proxyMap."example.com" = "10.0.0.5:25";
+
+    # Keys can also be a client IP address, e.g. a trusted outbound relay's.
+    proxyMap."192.0.2.10" = "10.0.0.9:25";
 
     # Or, to route a domain's sessions per protocol:
     proxyMap."example.net" = {

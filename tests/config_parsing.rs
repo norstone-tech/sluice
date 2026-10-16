@@ -7,11 +7,11 @@
 //! at the whole table. That's a silent regression if anyone ever swaps the impl back for a
 //! derive, hence asserting on the message text here.
 
-use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::{net::SocketAddr, str::FromStr};
 
 use abpl::app::config::parse_toml_file;
-use sluice::config::{MailProtocol, SluiceConfig};
+use sluice::config::{DomainOrIp, MailProtocol, SluiceConfig};
 
 /// Writes `contents` to a uniquely-named temp file and parses it. The file is left in place
 /// on failure so a broken case can be inspected by hand.
@@ -60,7 +60,7 @@ smtp_authenticated = "10.0.0.8:587"
 	let get = |domain: &str, protocol| {
 		config
 			.proxy_map
-			.get(domain)
+			.get(&DomainOrIp::from_str(domain).unwrap())
 			.unwrap_or_else(|| panic!("{domain} missing from proxy_map"))
 			.get(&protocol)
 			.map_err(|err| format!("{err:-}"))
@@ -141,4 +141,85 @@ fn rejects_malformed_upstream_address() {
 		!err.contains("did not match any variant"),
 		"the untagged-enum message means the hand-written Deserialize was lost, got: {err}"
 	);
+}
+
+/// IP keys parse as IPs and are canonicalized, so the spelling in the config can't affect matching. Domain keys are
+/// lowercased, matching how lookups treat the mail side.
+#[test]
+fn parses_ip_keys_canonically() {
+	let config = parse(
+		"ip-keys",
+		&format!(
+			r#"{BOILERPLATE}
+[proxy_map]
+"192.0.2.1" = "10.0.0.5:25"
+"::ffff:192.0.2.2" = "10.0.0.6:25"
+"2001:DB8:0:0:0:0:0:1" = "10.0.0.7:25"
+"Example.Test" = "10.0.0.8:25"
+"#
+		),
+	)
+	.expect("config with IP keys should parse");
+
+	let has = |key: &DomainOrIp| config.proxy_map.contains_key(key);
+	assert!(has(&DomainOrIp::ip("192.0.2.1").unwrap()));
+	assert!(
+		has(&DomainOrIp::ip("192.0.2.2").unwrap()),
+		"IPv4-mapped key should be canonicalized"
+	);
+	assert!(has(&DomainOrIp::ip("2001:db8::1").unwrap()));
+	assert!(has(&DomainOrIp::domain("example.test")));
+	// An IP-looking key is never reachable as a domain.
+	assert!(!has(&DomainOrIp::domain("192.0.2.1")));
+}
+
+/// A key that is neither an IP nor a hostname is a config error naming the key, instead of a rule that can never
+/// match.
+#[test]
+fn rejects_keys_that_are_neither_ip_nor_domain() {
+	for key in [
+		"[2001:db8::2]",
+		"192.0.2.256",
+		"192.0.2",
+		"unix:/run/x.sock",
+		"192.0.2.1:25",
+		"example.test.",
+		"-bad.test",
+		"bad-.test",
+		"under_score.test",
+		"spaced name.test",
+		"bücher.test",
+		"a..test",
+		"",
+	] {
+		let err = parse(
+			"bad-key",
+			&format!("{BOILERPLATE}\n[proxy_map]\n\"{key}\" = \"10.0.0.5:25\"\n"),
+		)
+		.expect_err(&format!("key {key:?} should be rejected"));
+		assert!(
+			err.contains("neither an IP address nor a valid domain name"),
+			"error for {key:?} should explain the problem, got: {err}"
+		);
+	}
+}
+
+/// Ordinary hostnames, including single labels and punycode, are accepted.
+#[test]
+fn accepts_ordinary_domain_keys() {
+	for key in [
+		"example.test",
+		"mail.sub.example.test",
+		"localhost",
+		"xn--bcher-kva.test",
+		"a-b.c1.test",
+		"1abc.test",
+	] {
+		let config = parse(
+			"good-key",
+			&format!("{BOILERPLATE}\n[proxy_map]\n\"{key}\" = \"10.0.0.5:25\"\n"),
+		)
+		.unwrap_or_else(|err| panic!("key {key:?} should parse: {err}"));
+		assert!(config.proxy_map.contains_key(&DomainOrIp::domain(key)), "{key:?}");
+	}
 }

@@ -12,7 +12,7 @@ use lazy_regex::regex_captures;
 use tracing::{info, warn};
 
 use crate::{
-	config::{MailProtocol, SluiceState},
+	config::{DomainOrIp, MailProtocol, SluiceState},
 	error::{
 		ProxyTableLookupError, ResultIntoProxyTableLookupErrorInvalidFrom as _,
 		ResultIntoProxyTableLookupErrorInvalidRcpt as _,
@@ -50,6 +50,11 @@ async fn auth(
 		.ok_or(ProxyTableLookupError::protocol_unknown())??;
 	mail_protocol.set_authenticated(authenticated_connection);
 
+	let ip_addr = headers
+		.get("Client-IP")
+		.and_then(|header_value| header_value.to_str().ok())
+		.and_then(|header_value| DomainOrIp::ip(header_value).ok());
+
 	if authenticated_connection {
 		// nginx doesn't send MAIL FROM on authenticated connections, so we have to use the provided user name. Assume
 		// that the user name is a valid e-mail address.
@@ -61,12 +66,26 @@ async fn auth(
 		)
 		.inspect_err(|err| warn!("nginx gave an invalid Auth-User: {err}"))
 		.map_err_invalid_from()?;
-		if let Some(upstreams) = state.proxy_map.get(&from.domain().to_ascii_lowercase()) {
+
+		// Having IP addresses as the domain part of the e-mail address intentionality fails here.
+		// We only want to match IPs based on the client's actual IP address.
+		if let Some(upstreams) = state.proxy_map.get(&DomainOrIp::domain(from.domain())) {
 			let server = upstreams.get(&mail_protocol)?;
 			info!("login \"{from}\" -> {server} via {mail_protocol}");
 			return Ok(ProxyTableResponse { server });
 		};
-		warn!("no configured upstream for user \"{from}\" via {mail_protocol}");
+
+		if let Some(ip_addr) = ip_addr {
+			if let Some(upstreams) = state.proxy_map.get(&ip_addr) {
+				let server = upstreams.get(&mail_protocol)?;
+				info!("ip \"{ip_addr}\" -> {server} via {mail_protocol}");
+				return Ok(ProxyTableResponse { server });
+			}
+			warn!("no configured upstream for user \"{from}\" ({ip_addr}) via {mail_protocol}");
+		} else {
+			warn!("no configured upstream for user \"{from}\" (no client IP) via {mail_protocol}");
+		}
+
 		Err(ProxyTableLookupError::auth_lookup_failed())
 	} else {
 		// this fails to parse on an empty string, the resulting error is slightly opaque, but only someone who's
@@ -80,11 +99,23 @@ async fn auth(
 		)
 		.inspect_err(|err| warn!("nginx gave an invalid mail recipient: {err}"))
 		.map_err_invalid_rcpt()?;
-		if let Some(upstreams) = state.proxy_map.get(&rcpt.domain().to_ascii_lowercase()) {
+
+		// Having IP addresses as the domain part of the e-mail address intentionality fails here.
+		// We only want to match IPs based on the client's actual IP address.
+		if let Some(upstreams) = state.proxy_map.get(&DomainOrIp::domain(rcpt.domain())) {
 			let server = upstreams.get(&mail_protocol)?;
 			info!("recipient \"{rcpt}\" -> {server} via {mail_protocol}");
 			return Ok(ProxyTableResponse { server });
 		};
+
+		if let Some(ip_addr) = ip_addr
+			&& let Some(upstreams) = state.proxy_map.get(&ip_addr)
+		{
+			let server = upstreams.get(&mail_protocol)?;
+			info!("ip \"{ip_addr}\" -> {server} via {mail_protocol}");
+			return Ok(ProxyTableResponse { server });
+		}
+
 		let from_unchecked = headers
 			.get("Auth-SMTP-From")
 			.and_then(|from| from.to_str().ok())
@@ -92,13 +123,12 @@ async fn auth(
 			.unwrap_or_default();
 
 		// from may be null, which may be the case in auto-generated bounce messages and the like.
+		// Again, matching IPs in the domain part intentionally fails. Unintentional open relays might happen
+		// otherwise.
 		if !from_unchecked.is_empty()
-			&& let Some(upstreams) = state.proxy_map.get(
-				&EmailAddress::from_str(from_unchecked)
-					.map_err_invalid_from()?
-					.domain()
-					.to_ascii_lowercase(),
-			) {
+			&& let Some(upstreams) = state.proxy_map.get(&DomainOrIp::domain(
+				EmailAddress::from_str(from_unchecked).map_err_invalid_from()?.domain(),
+			)) {
 			// We're going to assume that the upstream server can handle unauthenticated from addresses correctly.
 			let server = upstreams.get(&mail_protocol)?;
 			info!("sender \"{from_unchecked}\" -> {server} via {mail_protocol}");

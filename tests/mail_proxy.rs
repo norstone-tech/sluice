@@ -1,14 +1,15 @@
 mod support;
 
 use std::io::{BufRead, BufReader, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{IpAddr, SocketAddr, TcpStream};
+use std::os::fd::{FromRawFd as _, OwnedFd};
 use std::time::Duration;
 
 use base64::Engine as _;
 use support::sluice_env::{
-	NGINX_AUTH_SMTP_ADDR, NGINX_IMAP_ADDR, NGINX_POP3_ADDR, NGINX_UNAUTH_SMTP_ADDR, ROUTE_A_DOMAIN,
-	ROUTE_AUTH_ONLY_DOMAIN, ROUTE_B_DOMAIN, ROUTE_IMAP_ONLY_DOMAIN, ROUTE_SMTP_ONLY_DOMAIN, ROUTE_SPLIT_DOMAIN,
-	get_env,
+	DUMMY_UPSTREAM_A_ADDR, DUMMY_UPSTREAM_B_ADDR, NGINX_AUTH_SMTP_ADDR, NGINX_IMAP_ADDR, NGINX_POP3_ADDR,
+	NGINX_UNAUTH_SMTP_ADDR, ROUTE_A_DOMAIN, ROUTE_AUTH_ONLY_DOMAIN, ROUTE_B_DOMAIN, ROUTE_IMAP_ONLY_DOMAIN, ROUTE_IP_A,
+	ROUTE_IP_AUTH_ONLY, ROUTE_IP_B, ROUTE_IP_RELAY_CLIENT, ROUTE_SMTP_ONLY_DOMAIN, ROUTE_SPLIT_DOMAIN, get_env,
 };
 
 struct SmtpClient {
@@ -18,7 +19,42 @@ struct SmtpClient {
 
 impl SmtpClient {
 	fn connect(addr: SocketAddr) -> Self {
-		let stream = TcpStream::connect(addr).expect("failed to connect to nginx");
+		Self::from_stream(TcpStream::connect(addr).expect("failed to connect to nginx"))
+	}
+
+	/// Connects with the client socket bound to `source`, so nginx reports it as `Client-IP`. Anything in
+	/// 127.0.0.0/8 works on Linux without extra setup.
+	fn connect_from(addr: SocketAddr, source: &str) -> Self {
+		let source: IpAddr = source.parse().expect("source is a valid IP");
+		let (IpAddr::V4(source), SocketAddr::V4(addr)) = (source, addr) else {
+			panic!("connect_from only supports IPv4");
+		};
+		let stream = unsafe {
+			let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
+			assert!(fd >= 0, "socket() failed: {}", std::io::Error::last_os_error());
+			// Owning the fd from here on closes it on any panic below.
+			let owned = OwnedFd::from_raw_fd(fd);
+			let sockaddr = |ip: std::net::Ipv4Addr, port: u16| libc::sockaddr_in {
+				sin_family: libc::AF_INET as libc::sa_family_t,
+				sin_port: port.to_be(),
+				sin_addr: libc::in_addr {
+					s_addr: u32::from(ip).to_be(),
+				},
+				sin_zero: [0; 8],
+			};
+			let size = size_of::<libc::sockaddr_in>() as libc::socklen_t;
+			let local = sockaddr(source, 0);
+			let remote = sockaddr(*addr.ip(), addr.port());
+			let rc = libc::bind(fd, (&raw const local).cast(), size);
+			assert_eq!(rc, 0, "bind() failed: {}", std::io::Error::last_os_error());
+			let rc = libc::connect(fd, (&raw const remote).cast(), size);
+			assert_eq!(rc, 0, "connect() failed: {}", std::io::Error::last_os_error());
+			TcpStream::from(owned)
+		};
+		Self::from_stream(stream)
+	}
+
+	fn from_stream(stream: TcpStream) -> Self {
 		let reader = BufReader::new(stream.try_clone().expect("failed to clone stream"));
 		let mut client = Self { stream, reader };
 		client.read_response(); // greeting
@@ -437,6 +473,265 @@ fn rejects_unknown_or_missing_auth_protocol() {
 			"a rejected request must not carry an upstream: {response:?}"
 		);
 	}
+}
+
+/// Where a hand-built `/auth` request was routed, as the `Auth-Server`/`Auth-Port` pair nginx would connect to, or
+/// `None` if it was rejected.
+fn routed_to(response: &std::collections::HashMap<String, String>) -> Option<SocketAddr> {
+	if response.get("auth-status").map(String::as_str) != Some("OK") {
+		assert!(
+			!response.contains_key("auth-server"),
+			"a rejected request must not carry an upstream: {response:?}"
+		);
+		return None;
+	}
+	Some(
+		format!("{}:{}", response["auth-server"], response["auth-port"])
+			.parse()
+			.expect("sluice sent an unparseable upstream"),
+	)
+}
+
+fn unauthenticated_request<'a>(client_ip: Option<&'a str>, rcpt: &'a str, from: &'a str) -> Vec<(&'a str, &'a str)> {
+	let mut headers = vec![
+		("Auth-Protocol", "smtp"),
+		("Auth-Method", "none"),
+		("Auth-SMTP-To", rcpt),
+		("Auth-SMTP-From", from),
+	];
+	headers.extend(client_ip.map(|ip| ("Client-IP", ip)));
+	headers
+}
+
+fn authenticated_request<'a>(client_ip: Option<&'a str>, user: &'a str) -> Vec<(&'a str, &'a str)> {
+	let mut headers = vec![("Auth-Protocol", "smtp"), ("Auth-Method", "plain"), ("Auth-User", user)];
+	headers.extend(client_ip.map(|ip| ("Client-IP", ip)));
+	headers
+}
+
+/// The relay use case: an unmanaged recipient from a client with an IP rule goes to that rule's upstream.
+#[test]
+fn unauthenticated_falls_back_to_client_ip_when_recipient_is_unmanaged() {
+	let env = get_env();
+	let response = env.raw_auth_request(&unauthenticated_request(
+		Some(ROUTE_IP_A),
+		"RCPT TO:<someone@example.org>",
+		"MAIL FROM:<sender@unmanaged.test>",
+	));
+	assert_eq!(routed_to(&response), Some(DUMMY_UPSTREAM_A_ADDR), "{response:?}");
+
+	let response = env.raw_auth_request(&unauthenticated_request(
+		Some(ROUTE_IP_B),
+		"RCPT TO:<someone@example.org>",
+		"MAIL FROM:<sender@unmanaged.test>",
+	));
+	assert_eq!(routed_to(&response), Some(DUMMY_UPSTREAM_B_ADDR), "{response:?}");
+}
+
+/// A managed recipient domain beats the client IP: the relay client's mail for local domains still goes to the
+/// local server, only everything else goes to the relay.
+#[test]
+fn unauthenticated_recipient_domain_beats_client_ip() {
+	let env = get_env();
+	let response = env.raw_auth_request(&unauthenticated_request(
+		Some(ROUTE_IP_A),
+		&format!("RCPT TO:<user@{ROUTE_B_DOMAIN}>"),
+		"MAIL FROM:<sender@unmanaged.test>",
+	));
+	assert_eq!(routed_to(&response), Some(DUMMY_UPSTREAM_B_ADDR), "{response:?}");
+}
+
+/// Client IP is checked before the MAIL FROM domain fallback (deliberate; see the relay use case). Pinned so that
+/// reordering them is a conscious decision.
+#[test]
+fn unauthenticated_client_ip_beats_sender_domain() {
+	let env = get_env();
+	let response = env.raw_auth_request(&unauthenticated_request(
+		Some(ROUTE_IP_A),
+		"RCPT TO:<someone@example.org>",
+		&format!("MAIL FROM:<sender@{ROUTE_B_DOMAIN}>"),
+	));
+	assert_eq!(routed_to(&response), Some(DUMMY_UPSTREAM_A_ADDR), "{response:?}");
+}
+
+/// An IP with no rule changes nothing: the sender-domain fallback still works, and with nothing matching the
+/// request is rejected the usual way.
+#[test]
+fn unauthenticated_client_ip_without_rule_changes_nothing() {
+	let env = get_env();
+	let response = env.raw_auth_request(&unauthenticated_request(
+		Some("192.0.2.99"),
+		"RCPT TO:<someone@example.org>",
+		&format!("MAIL FROM:<sender@{ROUTE_B_DOMAIN}>"),
+	));
+	assert_eq!(routed_to(&response), Some(DUMMY_UPSTREAM_B_ADDR), "{response:?}");
+
+	let response = env.raw_auth_request(&unauthenticated_request(
+		Some("192.0.2.99"),
+		"RCPT TO:<someone@example.org>",
+		"MAIL FROM:<sender@unmanaged.test>",
+	));
+	assert_eq!(routed_to(&response), None, "{response:?}");
+	assert_eq!(response.get("auth-error-code").map(String::as_str), Some("550 5.7.1"));
+}
+
+/// Authenticated sessions use the user's domain first and only then the client IP.
+#[test]
+fn authenticated_routes_by_user_domain_then_client_ip() {
+	let env = get_env();
+	let response = env.raw_auth_request(&authenticated_request(
+		Some(ROUTE_IP_A),
+		&format!("user@{ROUTE_B_DOMAIN}"),
+	));
+	assert_eq!(routed_to(&response), Some(DUMMY_UPSTREAM_B_ADDR), "{response:?}");
+
+	let response = env.raw_auth_request(&authenticated_request(Some(ROUTE_IP_A), "user@unmanaged.test"));
+	assert_eq!(routed_to(&response), Some(DUMMY_UPSTREAM_A_ADDR), "{response:?}");
+
+	let response = env.raw_auth_request(&authenticated_request(Some("192.0.2.99"), "user@unmanaged.test"));
+	assert_eq!(routed_to(&response), None, "{response:?}");
+	assert_eq!(response.get("auth-error-code").map(String::as_str), Some("550 5.7.1"));
+}
+
+/// Client IPs compare by canonical address, not by spelling: nginx prints a dual-stack listener's IPv4 clients as
+/// `::ffff:a.b.c.d`, and IPv6 can be written many ways.
+#[test]
+fn client_ip_matches_regardless_of_spelling() {
+	let env = get_env();
+	for (client_ip, expected) in [
+		("::ffff:192.0.2.1", DUMMY_UPSTREAM_A_ADDR),
+		("::FFFF:192.0.2.1", DUMMY_UPSTREAM_A_ADDR),
+		("2001:db8:0:0:0:0:0:1", DUMMY_UPSTREAM_B_ADDR),
+		("2001:0DB8::1", DUMMY_UPSTREAM_B_ADDR),
+	] {
+		let response = env.raw_auth_request(&unauthenticated_request(
+			Some(client_ip),
+			"RCPT TO:<someone@example.org>",
+			"MAIL FROM:<sender@unmanaged.test>",
+		));
+		assert_eq!(routed_to(&response), Some(expected), "{client_ip}: {response:?}");
+	}
+}
+
+/// The matching IP rule has no entry for the protocol in play, so it is a managed client with nowhere to go.
+#[test]
+fn client_ip_rule_without_entry_for_protocol_is_rejected() {
+	let env = get_env();
+	let response = env.raw_auth_request(&unauthenticated_request(
+		Some(ROUTE_IP_AUTH_ONLY),
+		"RCPT TO:<someone@example.org>",
+		"MAIL FROM:<sender@unmanaged.test>",
+	));
+	assert_eq!(routed_to(&response), None, "{response:?}");
+	assert_eq!(response.get("auth-error-code").map(String::as_str), Some("550 5.7.0"));
+
+	let response = env.raw_auth_request(&authenticated_request(Some(ROUTE_IP_AUTH_ONLY), "user@unmanaged.test"));
+	assert_eq!(routed_to(&response), Some(DUMMY_UPSTREAM_A_ADDR), "{response:?}");
+}
+
+/// nginx sends `unix:/path` (or just `unix:`) for unix-socket listeners, and a header could be missing or garbage.
+/// None of those can match an IP rule, but must not break domain routing or panic.
+#[test]
+fn unusable_client_ip_disables_only_ip_matching() {
+	let env = get_env();
+	for client_ip in [
+		None,
+		Some("unix:/run/nginx-mail.sock"),
+		Some("unix:"),
+		Some(""),
+		Some("not an ip"),
+	] {
+		let response = env.raw_auth_request(&unauthenticated_request(
+			client_ip,
+			&format!("RCPT TO:<user@{ROUTE_A_DOMAIN}>"),
+			"MAIL FROM:<sender@unmanaged.test>",
+		));
+		assert_eq!(
+			routed_to(&response),
+			Some(DUMMY_UPSTREAM_A_ADDR),
+			"{client_ip:?}: {response:?}"
+		);
+
+		let response = env.raw_auth_request(&unauthenticated_request(
+			client_ip,
+			"RCPT TO:<someone@example.org>",
+			"MAIL FROM:<sender@unmanaged.test>",
+		));
+		assert_eq!(routed_to(&response), None, "{client_ip:?}: {response:?}");
+		assert_eq!(
+			response.get("auth-error-code").map(String::as_str),
+			Some("550 5.7.1"),
+			"{client_ip:?}: {response:?}"
+		);
+
+		let response = env.raw_auth_request(&authenticated_request(client_ip, "user@unmanaged.test"));
+		assert_eq!(routed_to(&response), None, "{client_ip:?}: {response:?}");
+	}
+}
+
+/// An IP written into the *address* never matches an IP rule; only the real `Client-IP` does. Otherwise a sender
+/// could pick their own route (or an open relay) with `MAIL FROM:<x@[192.0.2.1]>`.
+#[test]
+fn ip_in_email_domain_never_matches_an_ip_rule() {
+	let env = get_env();
+	for domain in [ROUTE_IP_A, "[192.0.2.1]", "[IPv6:2001:db8::1]"] {
+		let response = env.raw_auth_request(&unauthenticated_request(
+			Some("192.0.2.99"),
+			&format!("RCPT TO:<user@{domain}>"),
+			"MAIL FROM:<sender@unmanaged.test>",
+		));
+		assert_eq!(routed_to(&response), None, "rcpt {domain}: {response:?}");
+
+		let response = env.raw_auth_request(&unauthenticated_request(
+			Some("192.0.2.99"),
+			"RCPT TO:<someone@example.org>",
+			&format!("MAIL FROM:<sender@{domain}>"),
+		));
+		assert_eq!(routed_to(&response), None, "sender {domain}: {response:?}");
+
+		let response = env.raw_auth_request(&authenticated_request(Some("192.0.2.99"), &format!("user@{domain}")));
+		assert_eq!(routed_to(&response), None, "login {domain}: {response:?}");
+	}
+}
+
+/// End to end through real nginx: the relay client's own address becomes `Client-IP`. Domains sluice manages still
+/// go to the local upstream (A); everything else goes to the relay (B).
+#[test]
+fn routes_unauthenticated_session_by_real_client_ip() {
+	let env = get_env();
+	let _session = env.lock_session();
+
+	let mut client = SmtpClient::connect_from(NGINX_UNAUTH_SMTP_ADDR, ROUTE_IP_RELAY_CLIENT);
+	assert!(client.command("HELO test.local").starts_with("250"));
+	assert!(client.command("MAIL FROM:<sender@unmanaged.test>").starts_with("250"));
+	let rcpt_resp = client.command("RCPT TO:<someone@example.org>");
+	assert!(rcpt_resp.starts_with("250"), "unexpected RCPT TO response: {rcpt_resp}");
+	drop(client);
+	assert_eq!(env.recv_upstream_hit(Duration::from_secs(5)).upstream, "route-b");
+
+	let mut client = SmtpClient::connect_from(NGINX_UNAUTH_SMTP_ADDR, ROUTE_IP_RELAY_CLIENT);
+	assert!(client.command("HELO test.local").starts_with("250"));
+	assert!(client.command("MAIL FROM:<sender@unmanaged.test>").starts_with("250"));
+	let rcpt_resp = client.command(&format!("RCPT TO:<user@{ROUTE_A_DOMAIN}>"));
+	assert!(rcpt_resp.starts_with("250"), "unexpected RCPT TO response: {rcpt_resp}");
+	drop(client);
+	assert_eq!(env.recv_upstream_hit(Duration::from_secs(5)).upstream, "route-a");
+}
+
+/// Same, authenticated: nginx asks at AUTH time, so a login from an unmanaged domain is routed by client IP.
+#[test]
+fn routes_authenticated_session_by_real_client_ip() {
+	let env = get_env();
+	let _session = env.lock_session();
+	let mut client = SmtpClient::connect_from(NGINX_AUTH_SMTP_ADDR, ROUTE_IP_RELAY_CLIENT);
+
+	assert!(client.command("EHLO test.local").contains("AUTH"));
+	let creds = base64_plain_auth("user@unmanaged.test", "dummy-password");
+	let auth_resp = client.command(&format!("AUTH PLAIN {creds}"));
+	assert!(auth_resp.starts_with("235"), "unexpected AUTH response: {auth_resp}");
+	drop(client);
+
+	assert_eq!(env.recv_upstream_hit(Duration::from_secs(5)).upstream, "route-b");
 }
 
 fn base64_plain_auth(user: &str, pass: &str) -> String {

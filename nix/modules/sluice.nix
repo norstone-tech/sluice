@@ -60,13 +60,28 @@ in
       type = lib.types.attrsOf (lib.types.either lib.types.str (lib.types.attrsOf lib.types.str));
       default = { };
       description = ''
-        Map from a mailbox domain to the upstream server address (`host:port`) sluice tells
-        nginx to proxy that session to.
+        Map from a mailbox domain or a client IP address to the upstream server address
+        (`host:port`) sluice tells nginx to proxy that session to.
 
-        The domain used to look up an entry is, in priority order:
+        Keys must be either an IP address (IPv4 or IPv6, not bracketed) or a valid domain name;
+        anything else is a configuration error. Domains are case-insensitive and
+        internationalized domains must be written in punycode. IPv4-mapped IPv6 addresses
+        (`::ffff:a.b.c.d`) are treated as the plain IPv4 address.
+
+        The entry used is the first match, in priority order, of:
         - the authenticated user's own domain (authenticated connections only)
-        - the mail recipient's domain
-        - the unauthenticated mail sender's domain.
+        - the mail recipient's domain (unauthenticated connections only)
+        - the client's IP address, as reported by nginx's `Client-IP`
+        - the unauthenticated mail sender's domain (unauthenticated connections only).
+
+        IP entries only ever match the connecting client's own address, never an IP written into
+        an e-mail address. They are meant for trusted outbound relays: any recipient domain sluice
+        doesn't manage, from a listed client IP, is routed to that IP's upstream. Only list
+        addresses whose upstream you trust to handle that mail.
+
+        If nginx runs behind a proxy or load balancer, the client address is the proxy's unless
+        nginx uses `proxy_protocol` together with `set_real_ip_from`. Without that, an IP entry
+        matches every client behind the proxy.
 
         A domain's value is either a single address+port, which assumes nginx is only proxying
         a single procol used for every protocol, or an attribute set mapping a protocol to its
@@ -82,6 +97,8 @@ in
       '';
       example = {
         "example.com" = "10.0.0.5:25";
+        # a trusted outbound relay, by client IP
+        "192.0.2.10" = "10.0.0.9:25";
         "example.org" = {
           smtp = "10.0.0.6:25";
           smtp_authenticated = "10.0.0.6:587";

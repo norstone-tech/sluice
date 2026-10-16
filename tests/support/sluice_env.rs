@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{Ipv4Addr, SocketAddr as NetSocketAddr, SocketAddrV4, TcpListener, TcpStream};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, Weak};
@@ -10,7 +11,7 @@ use std::time::Duration;
 use abpl::app::axum::HotReloadingAxumService;
 use abpl::sync::MithridatistLockResult as _;
 use abpl::types::http::SocketAddr as HttpSocketAddr;
-use sluice::config::{MailProtocol, NetSocketAddrs, SluiceState};
+use sluice::config::{DomainOrIp, MailProtocol, NetSocketAddrs, SluiceState};
 use sluice::http;
 
 use super::nginx::NginxHandle;
@@ -33,6 +34,17 @@ pub const ROUTE_SMTP_ONLY_DOMAIN: &str = "routesmtponly.test";
 /// to prove that fallback does *not* run in the other direction.
 pub const ROUTE_AUTH_ONLY_DOMAIN: &str = "routeauthonly.test";
 
+/// Client IPs routed through the fixture's proxy_map. These are documentation-range addresses (RFC 5737 /
+/// RFC 3849), so they can only ever reach sluice via a hand-written `Client-IP` header (see `raw_auth_request`);
+/// no real session from the test client can collide with them.
+pub const ROUTE_IP_A: &str = "192.0.2.1";
+pub const ROUTE_IP_B: &str = "2001:db8::1";
+/// Mapped per-protocol with only an `smtp_authenticated` entry, like `ROUTE_AUTH_ONLY_DOMAIN`.
+pub const ROUTE_IP_AUTH_ONLY: &str = "192.0.2.3";
+/// A real loopback address the e2e tests bind their client socket to, so nginx sees it as `Client-IP`. Routes to
+/// upstream B, standing in for the trusted outbound relay.
+pub const ROUTE_IP_RELAY_CLIENT: &str = "127.0.0.20";
+
 // Every fixture service gets its own address on the 127.0.0.0/8 loopback range instead of
 // sharing 127.0.0.1 on dynamically picked ports - simpler to read/debug, and no
 // bind-then-release TOCTOU race against whatever else is running on the machine.
@@ -45,8 +57,8 @@ pub const ROUTE_AUTH_ONLY_DOMAIN: &str = "routeauthonly.test";
 const fn loopback(host: u8, port: u16) -> NetSocketAddr {
 	NetSocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, host), port))
 }
-const DUMMY_UPSTREAM_A_ADDR: NetSocketAddr = loopback(2, 32500);
-const DUMMY_UPSTREAM_B_ADDR: NetSocketAddr = loopback(3, 32500);
+pub const DUMMY_UPSTREAM_A_ADDR: NetSocketAddr = loopback(2, 32500);
+pub const DUMMY_UPSTREAM_B_ADDR: NetSocketAddr = loopback(3, 32500);
 // Mailbox-protocol upstreams are separate listeners rather than more entries pointing at A/B,
 // because the dialect an upstream greets in is fixed before it has read anything - see
 // `Dialect`. Being distinct addresses also sharpens the routing assertions: a session landing
@@ -108,15 +120,15 @@ impl SluiceEnv {
 
 		let mut proxy_map = HashMap::new();
 		proxy_map.insert(
-			ROUTE_A_DOMAIN.to_string(),
+			DomainOrIp::from_str(ROUTE_A_DOMAIN).unwrap(),
 			NetSocketAddrs::Single(DUMMY_UPSTREAM_A_ADDR),
 		);
 		proxy_map.insert(
-			ROUTE_B_DOMAIN.to_string(),
+			DomainOrIp::from_str(ROUTE_B_DOMAIN).unwrap(),
 			NetSocketAddrs::Single(DUMMY_UPSTREAM_B_ADDR),
 		);
 		proxy_map.insert(
-			ROUTE_SPLIT_DOMAIN.to_string(),
+			DomainOrIp::from_str(ROUTE_SPLIT_DOMAIN).unwrap(),
 			NetSocketAddrs::ByProtocol(HashMap::from([
 				(MailProtocol::Smtp, DUMMY_UPSTREAM_A_ADDR),
 				(MailProtocol::SmtpAuthenticated, DUMMY_UPSTREAM_B_ADDR),
@@ -124,19 +136,39 @@ impl SluiceEnv {
 			])),
 		);
 		proxy_map.insert(
-			ROUTE_IMAP_ONLY_DOMAIN.to_string(),
+			DomainOrIp::from_str(ROUTE_IMAP_ONLY_DOMAIN).unwrap(),
 			NetSocketAddrs::ByProtocol(HashMap::from([(MailProtocol::Imap, DUMMY_IMAP_UPSTREAM_ADDR)])),
 		);
 		proxy_map.insert(
-			ROUTE_SMTP_ONLY_DOMAIN.to_string(),
+			DomainOrIp::from_str(ROUTE_SMTP_ONLY_DOMAIN).unwrap(),
 			NetSocketAddrs::ByProtocol(HashMap::from([(MailProtocol::Smtp, DUMMY_UPSTREAM_A_ADDR)])),
 		);
 		proxy_map.insert(
-			ROUTE_AUTH_ONLY_DOMAIN.to_string(),
+			DomainOrIp::from_str(ROUTE_AUTH_ONLY_DOMAIN).unwrap(),
 			NetSocketAddrs::ByProtocol(HashMap::from([(
 				MailProtocol::SmtpAuthenticated,
 				DUMMY_UPSTREAM_A_ADDR,
 			)])),
+		);
+
+		proxy_map.insert(
+			DomainOrIp::from_str(ROUTE_IP_A).unwrap(),
+			NetSocketAddrs::Single(DUMMY_UPSTREAM_A_ADDR),
+		);
+		proxy_map.insert(
+			DomainOrIp::from_str(ROUTE_IP_B).unwrap(),
+			NetSocketAddrs::Single(DUMMY_UPSTREAM_B_ADDR),
+		);
+		proxy_map.insert(
+			DomainOrIp::from_str(ROUTE_IP_AUTH_ONLY).unwrap(),
+			NetSocketAddrs::ByProtocol(HashMap::from([(
+				MailProtocol::SmtpAuthenticated,
+				DUMMY_UPSTREAM_A_ADDR,
+			)])),
+		);
+		proxy_map.insert(
+			DomainOrIp::from_str(ROUTE_IP_RELAY_CLIENT).unwrap(),
+			NetSocketAddrs::Single(DUMMY_UPSTREAM_B_ADDR),
 		);
 
 		let mut axum = HotReloadingAxumService::new(SluiceState { proxy_map }, |_| http::build_router());

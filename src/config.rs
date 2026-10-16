@@ -1,6 +1,12 @@
-use std::{collections::HashMap, fmt::Display, net::SocketAddr as NetSocketAddr, str::FromStr};
+use std::{
+	collections::HashMap,
+	fmt::Display,
+	net::{IpAddr, SocketAddr as NetSocketAddr},
+	str::FromStr,
+};
 
 use abpl::{app::log::ProvidesEnvFilter, types::http::SocketAddr as HttpSocketAddr};
+use lazy_regex::regex_is_match;
 use serde::{Deserialize, Serialize};
 use serde_with::{DeserializeFromStr, DisplayFromStr, SerializeDisplay, serde_as};
 use tracing_subscriber::EnvFilter;
@@ -124,13 +130,82 @@ impl FromStr for MailProtocol {
 	}
 }
 
+/// A `proxy_map` key: either a mail domain or a client IP address.
+///
+/// IPs are canonicalized (IPv4-mapped IPv6 becomes plain IPv4) so config keys and `Client-IP` values compare equal
+/// whichever way they were written.
+#[derive(Debug, Clone, PartialEq, Eq, SerializeDisplay, DeserializeFromStr, Hash)]
+pub enum DomainOrIp {
+	Domain(String),
+	Ip(IpAddr),
+}
+impl DomainOrIp {
+	/// Parses `s` as an IP address only, for values that must not be mistaken for a domain.
+	pub fn ip(s: &str) -> Result<Self, <IpAddr as FromStr>::Err> {
+		IpAddr::from_str(s).map(|ip| Self::Ip(ip.to_canonical()))
+	}
+	/// Always a domain, even if `s` looks like an IP address. Lowercased, since domains compare case-insensitively.
+	pub fn domain(s: &str) -> Self {
+		Self::Domain(s.to_ascii_lowercase())
+	}
+}
+/// Returned when a `proxy_map` key is neither an IP address nor a plausible domain name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidDomainOrIp(String);
+impl Display for InvalidDomainOrIp {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(
+			f,
+			"\"{}\" is neither an IP address nor a valid domain name (IPv6 addresses must not be bracketed, and \
+			 internationalized domains must be written in punycode)",
+			self.0
+		)
+	}
+}
+impl std::error::Error for InvalidDomainOrIp {}
+
+/// Whether `s` is a syntactically valid hostname: dot-separated LDH labels of 1-63 characters that neither start
+/// nor end with a hyphen, at most 253 characters in total, and a final label that isn't all digits (which would be
+/// indistinguishable from a malformed IPv4 address).
+fn is_valid_domain(s: &str) -> bool {
+	s.len() <= 253
+		&& regex_is_match!(
+			r"^(?i:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?i:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$",
+			s
+		) && !s
+		.rsplit('.')
+		.next()
+		.is_some_and(|tld| tld.bytes().all(|b| b.is_ascii_digit()))
+}
+
+impl FromStr for DomainOrIp {
+	type Err = InvalidDomainOrIp;
+	fn from_str(s: &str) -> Result<Self, Self::Err> {
+		if let Ok(ip) = Self::ip(s) {
+			Ok(ip)
+		} else if is_valid_domain(s) {
+			Ok(Self::domain(s))
+		} else {
+			Err(InvalidDomainOrIp(s.to_owned()))
+		}
+	}
+}
+impl Display for DomainOrIp {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			DomainOrIp::Domain(str) => str.fmt(f),
+			DomainOrIp::Ip(ip) => ip.fmt(f),
+		}
+	}
+}
+
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SluiceConfig {
 	pub bind: Vec<HttpSocketAddr>,
 	#[serde_as(as = "DisplayFromStr")]
 	pub log_filter: EnvFilter,
-	pub proxy_map: HashMap<String, NetSocketAddrs>,
+	pub proxy_map: HashMap<DomainOrIp, NetSocketAddrs>,
 }
 impl ProvidesEnvFilter for SluiceConfig {
 	fn log_filter(&self) -> EnvFilter {
@@ -140,5 +215,5 @@ impl ProvidesEnvFilter for SluiceConfig {
 
 #[derive(Debug)]
 pub struct SluiceState {
-	pub proxy_map: HashMap<String, NetSocketAddrs>,
+	pub proxy_map: HashMap<DomainOrIp, NetSocketAddrs>,
 }
